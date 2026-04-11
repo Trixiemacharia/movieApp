@@ -2,6 +2,12 @@ import requests
 from requests.exceptions import RequestException
 from django.conf import settings
 
+class TMDBException(Exception):
+    pass
+
+class TMDBRateLimitException(TMDBException):
+    pass
+
 class TMDBClient:
     BASE_URL = "http://api.themoviedb.org/3"
 

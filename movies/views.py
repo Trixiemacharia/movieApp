@@ -3,11 +3,23 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 from django.utils import timezone
-from core.tmdb_client import TMDBClient
+from core.tmdb_client import TMDBClient,TMDBRateLimitException
 from .serializers import MovieSearchSerializer, TVSearchSerializer, MovieDetailSerializer
-from .models import SearchCache
+from .models import SearchCache, WatchHistory
 import json
 
+def handle_tmdb_error(e):
+    if isinstance(e, TMDBRateLimitException):
+        response = Response(
+            {"error": "TMDB rate limit exceeded. Please try again later."},
+            status= status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+        response["Retry-After"] = str(e)
+        return response
+    return Response(
+        {"error": str(e)},
+        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+    )
 
 # ── Movie Search ─────────────────────────────────────────
 class MovieSearchView(APIView):
@@ -66,6 +78,17 @@ class MovieDetailView(APIView):
             client = TMDBClient()
             data = client.get_movie_detail(movie_id)
             serializer = MovieDetailSerializer(data)
+
+            WatchHistory.objects.get_or_create(
+                user = request.user,
+                media_id = movie_id,
+                media_type='movie',
+                defaults={
+                    'title': data.get('title',''),
+                    'poster_path':f"https://image.tmdb.org/t/p/w500{data.get('poster_path')}"
+                    if data.get('poster_path') else None,
+                }
+            )
             return Response(serializer.data)
 
         except Exception as e:
@@ -74,7 +97,78 @@ class MovieDetailView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+# ── Trending View ─────────────────────────────────────────
+class TrendingView(APIView):
+    permission_classes = [IsAuthenticated]
 
+    def get(self, request):
+        media_type = request.query_params.get('type', 'movie')
+        time_window = request.query_params.get('window', 'day')
+
+        # Validate params
+        if media_type not in ['movie', 'tv']:
+            return Response(
+                {"error": "type must be 'movie' or 'tv'"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if time_window not in ['day', 'week']:
+            return Response(
+                {"error": "window must be 'day' or 'week'"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            client = TMDBClient()
+            data = client.get_trending(
+                media_type=media_type,
+                time_window=time_window
+            )
+
+            if media_type == 'movie':
+                serializer = MovieSearchSerializer(data['results'], many=True)
+            else:
+                serializer = TVSearchSerializer(data['results'], many=True)
+
+            return Response({
+                "media_type": media_type,
+                "time_window": time_window,
+                "total_results": len(data['results']),
+                "results": serializer.data
+            })
+
+        except Exception as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+# ── Watch History View ────────────────────────────────────
+class WatchHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        history = WatchHistory.objects.filter(
+            user=request.user
+        ).order_by('-watched_at')
+
+        data = [{
+            "id": h.id,
+            "media_id": h.media_id,
+            "media_type": h.media_type,
+            "title": h.title,
+            "poster_path": h.poster_path,
+            "watched_at": h.watched_at,
+        } for h in history]
+
+        return Response({"results": data})
+
+    def delete(self, request):
+        WatchHistory.objects.filter(user=request.user).delete()
+        return Response(
+            {"message": "Watch history cleared."},
+            status=status.HTTP_200_OK
+        )
+    
 # ── Trailer View ──────────────────────────────────────────
 class TrailerView(APIView):
     permission_classes = [IsAuthenticated]
